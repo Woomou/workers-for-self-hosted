@@ -78,12 +78,16 @@ if [ -d ".vercel/output/static" ]; then
     BUILD_DIR=".vercel/output/static"
 elif [ -d "out" ]; then
     BUILD_DIR="out"
+elif [ -d "build" ]; then
+    BUILD_DIR="build"
 elif [ -d "../.vercel/output/static" ]; then
     BUILD_DIR="../.vercel/output/static"
 elif [ -d "../out" ]; then
     BUILD_DIR="../out"
+elif [ -d "../svelte-blog/build" ]; then
+    BUILD_DIR="../svelte-blog/build"
 else
-    echo "⚠️  Error: Build output directory not found (.vercel/output/static or out)"
+    echo "⚠️  Error: Build output directory not found (.vercel/output/static, out, or build)"
     echo "   Please run build command first: npm run build"
     exit 1
 fi
