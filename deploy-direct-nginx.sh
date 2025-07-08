@@ -6,7 +6,10 @@
 set -e  # Exit on error
 
 # Load environment variables
-if [ -f "self-hosted/.env" ]; then
+if [ -f ".env" ]; then
+    echo "📝 Loading environment variables..."
+    export $(cat .env | grep -v '^#' | xargs)
+elif [ -f "self-hosted/.env" ]; then
     echo "📝 Loading environment variables..."
     export $(cat self-hosted/.env | grep -v '^#' | xargs)
 fi
@@ -30,8 +33,8 @@ if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
     exit 1
 fi
 
-if [ ! -f "self-hosted/self-hosted-deploy.pem" ]; then
-    echo "⚠️  Error: self-hosted/self-hosted-deploy.pem file not found"
+if [ ! -f "self-hosted-deploy.pem" ] && [ ! -f "self-hosted/self-hosted-deploy.pem" ]; then
+    echo "⚠️  Error: self-hosted-deploy.pem file not found"
     echo "   Self-hosted deployment requires PEM file for authentication"
     exit 1
 fi
@@ -39,18 +42,25 @@ fi
 echo "🚀 Starting deployment for domain: $DOMAIN"
 echo "📡 Target server: $SELFDEPLOYIP"
 
+# Determine SSH key path
+if [ -f "self-hosted-deploy.pem" ]; then
+    SSH_KEY="self-hosted-deploy.pem"
+else
+    SSH_KEY="self-hosted/self-hosted-deploy.pem"
+fi
+
 # Set SSH key permissions
-chmod 600 self-hosted/self-hosted-deploy.pem
+chmod 600 "$SSH_KEY"
 
 # Derive configuration variables from domain
 DOMAIN_CLEAN=$(echo "$DOMAIN" | sed 's/www\.//')  # Remove www. prefix if present
 SITE_DIR="/opt/${DOMAIN_CLEAN//./-}-site"  # Convert dots to dashes for directory
-CONFIG_NAME="$DOMAIN_CLEAN"  # Use clean domain for config filename
-SSH_KEY="self-hosted/self-hosted-deploy.pem"
 SSH_OPTS="-i $SSH_KEY -o StrictHostKeyChecking=no"
 
+echo "🚀 Starting deployment for domain: $DOMAIN"
+echo "📡 Target server: $SELFDEPLOYIP"
 echo "📁 Site directory: $SITE_DIR"
-echo "🔧 Config name: $CONFIG_NAME"
+echo "🔧 Config will be named: $DOMAIN"
 
 # # 2. Install nginx and certbot
 # echo "📦 Installing nginx and certbot..."
@@ -65,20 +75,23 @@ ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
 # 4. Sync static files to remote server
 echo "🔄 Syncing static files to remote server..."
 if [ -d ".vercel/output/static" ]; then
-    rsync -avz --delete \
-        -e "ssh $SSH_OPTS" \
-        .vercel/output/static/ \
-        "ubuntu@$SELFDEPLOYIP:$SITE_DIR"
+    BUILD_DIR=".vercel/output/static"
 elif [ -d "out" ]; then
-    rsync -avz --delete \
-        -e "ssh $SSH_OPTS" \
-        out/ \
-        "ubuntu@$SELFDEPLOYIP:$SITE_DIR"
+    BUILD_DIR="out"
+elif [ -d "../.vercel/output/static" ]; then
+    BUILD_DIR="../.vercel/output/static"
+elif [ -d "../out" ]; then
+    BUILD_DIR="../out"
 else
     echo "⚠️  Error: Build output directory not found (.vercel/output/static or out)"
     echo "   Please run build command first: npm run build"
     exit 1
 fi
+
+rsync -avz --delete \
+    -e "ssh $SSH_OPTS" \
+    "$BUILD_DIR/" \
+    "ubuntu@$SELFDEPLOYIP:$SITE_DIR"
 
 # 5. Set static file permissions
 echo "🔒 Setting file permissions..."
@@ -89,26 +102,42 @@ ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
 echo "⚙️  Deploying nginx configuration..."
 
 # Upload main configuration file
-scp $SSH_OPTS self-hosted/nginx-main.conf "ubuntu@$SELFDEPLOYIP:/tmp/nginx-default"
+if [ -f "nginx-main.conf" ]; then
+    NGINX_CONF="nginx-main.conf"
+else
+    NGINX_CONF="self-hosted/nginx-main.conf"
+fi
+scp $SSH_OPTS "$NGINX_CONF" "ubuntu@$SELFDEPLOYIP:/tmp/nginx-default"
 ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
     "sudo mv /tmp/nginx-default /etc/nginx/sites-available/default"
 
 # Generate and upload temporary site configuration file
 echo "⚙️  Generating temporary site configuration..."
+if [ -f "example-site-temp.conf" ]; then
+    TEMP_CONF="example-site-temp.conf"
+else
+    TEMP_CONF="self-hosted/example-site-temp.conf"
+fi
+
 sed -e "s/example\.com/$DOMAIN_CLEAN/g" \
     -e "s/www\.example\.com/www.$DOMAIN_CLEAN/g" \
     -e "s/example_access\.log/${DOMAIN_CLEAN//./_}_access.log/g" \
     -e "s/example_error\.log/${DOMAIN_CLEAN//./_}_error.log/g" \
-    -e "s/\/opt\/example-site/$SITE_DIR/g" \
-    self-hosted/example-site-temp.conf > "/tmp/${CONFIG_NAME}-temp.conf"
+    -e "s/\/opt\/example-site/${SITE_DIR//\//\\/}/g" \
+    "$TEMP_CONF" > "/tmp/${DOMAIN}-temp.conf"
 
-scp $SSH_OPTS "/tmp/${CONFIG_NAME}-temp.conf" "ubuntu@$SELFDEPLOYIP:/tmp/${CONFIG_NAME}-temp"
+scp $SSH_OPTS "/tmp/${DOMAIN}-temp.conf" "ubuntu@$SELFDEPLOYIP:/tmp/${DOMAIN}-temp"
 ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
-    "sudo mv /tmp/${CONFIG_NAME}-temp /etc/nginx/sites-available/$CONFIG_NAME && \
-     sudo ln -sf /etc/nginx/sites-available/$CONFIG_NAME /etc/nginx/sites-enabled/"
+    "sudo mv /tmp/${DOMAIN}-temp /etc/nginx/sites-available/$DOMAIN && \
+     sudo ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/"
 
 # Upload SSL setup script
-scp $SSH_OPTS self-hosted/setup-ssl.sh "ubuntu@$SELFDEPLOYIP:/tmp/setup-ssl.sh"
+if [ -f "setup-ssl.sh" ]; then
+    SSL_SCRIPT="setup-ssl.sh"
+else
+    SSL_SCRIPT="self-hosted/setup-ssl.sh"
+fi
+scp $SSH_OPTS "$SSL_SCRIPT" "ubuntu@$SELFDEPLOYIP:/tmp/setup-ssl.sh"
 ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
     "sudo mv /tmp/setup-ssl.sh /root/setup-ssl.sh && sudo chmod +x /root/setup-ssl.sh"
 
@@ -147,16 +176,23 @@ ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
 
 # 13. Generate and upload final site configuration (with Let's Encrypt certificate paths)
 echo "🔄 Generating final nginx configuration to use Let's Encrypt certificates..."
-sed -e "s/example\.com/$DOMAIN_CLEAN/g" \
+if [ -f "example-site.conf" ]; then
+    FINAL_CONF="example-site.conf"
+else
+    FINAL_CONF="self-hosted/example-site.conf"
+fi
+
+sed -e "s/\/etc\/letsencrypt\/live\/example\.com/\/etc\/letsencrypt\/live\/$DOMAIN/g" \
+    -e "s/example\.com/$DOMAIN_CLEAN/g" \
     -e "s/www\.example\.com/www.$DOMAIN_CLEAN/g" \
     -e "s/example_access\.log/${DOMAIN_CLEAN//./_}_access.log/g" \
     -e "s/example_error\.log/${DOMAIN_CLEAN//./_}_error.log/g" \
-    -e "s/\/opt\/example-site/$SITE_DIR/g" \
-    self-hosted/example-site.conf > "/tmp/${CONFIG_NAME}-final.conf"
+    -e "s/\/opt\/example-site/${SITE_DIR//\//\\/}/g" \
+    "$FINAL_CONF" > "/tmp/${DOMAIN}-final.conf"
 
-scp $SSH_OPTS "/tmp/${CONFIG_NAME}-final.conf" "ubuntu@$SELFDEPLOYIP:/tmp/${CONFIG_NAME}-final"
+scp $SSH_OPTS "/tmp/${DOMAIN}-final.conf" "ubuntu@$SELFDEPLOYIP:/tmp/${DOMAIN}-final"
 ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
-    "sudo mv /tmp/${CONFIG_NAME}-final /etc/nginx/sites-available/$CONFIG_NAME"
+    "sudo mv /tmp/${DOMAIN}-final /etc/nginx/sites-available/$DOMAIN"
 
 # 14. Test configuration and restart nginx
 echo "🧪 Testing nginx configuration..."
@@ -170,17 +206,17 @@ ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
 echo "🧪 Testing HTTPS access..."
 sleep 5
 ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
-    "curl -s -o /dev/null -w 'HTTPS Status: %{http_code}\n' https://www.$DOMAIN/ --insecure || echo 'HTTPS test failed'"
+    "curl -s -o /dev/null -w 'HTTPS Status: %{http_code}\n' https://$DOMAIN/ --insecure || echo 'HTTPS test failed'"
 
 echo ""
 echo "✅ Direct Nginx + SSL deployment completed!"
 echo "🔗 Access URLs:"
 echo "   HTTP: http://$SELFDEPLOYIP"
-echo "   HTTPS: https://www.$DOMAIN"
+echo "   HTTPS: https://$DOMAIN"
 echo ""
 echo "🧪 Test commands:"
 echo "   HTTP: curl http://$SELFDEPLOYIP/"
-echo "   HTTPS (after SSL): curl https://www.$DOMAIN/"
+echo "   HTTPS (after SSL): curl https://$DOMAIN/"
 echo ""
 echo "🔍 Monitoring commands:"
 echo "  View access logs: ssh $SSH_OPTS ubuntu@$SELFDEPLOYIP 'sudo tail -f /var/log/nginx/${DOMAIN_CLEAN//./_}_access.log'"
@@ -189,4 +225,4 @@ echo "  Check service status: ssh $SSH_OPTS ubuntu@$SELFDEPLOYIP 'sudo systemctl
 
 # Clean up temporary files
 echo "🧹 Cleaning up temporary files..."
-rm -f "/tmp/${CONFIG_NAME}-temp.conf" "/tmp/${CONFIG_NAME}-final.conf"
+rm -f "/tmp/${DOMAIN}-temp.conf" "/tmp/${DOMAIN}-final.conf"
