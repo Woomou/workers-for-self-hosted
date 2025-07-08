@@ -1,11 +1,9 @@
 #!/bin/bash
 
-# Example Site - Direct Nginx Deployment Script (Alternative to Proxy Manager)
-# Usage: ./deploy-direct-nginx.sh
+# Direct Nginx Deployment Script for Static Sites
+# Usage: SELFDEPLOYIP=your.server.ip DOMAIN=example.com ./deploy-direct-nginx.sh
 
 set -e  # Exit on error
-
-echo "🚀 Starting deployment of Example Site to direct Nginx configuration..."
 
 # Load environment variables
 if [ -f "self-hosted/.env" ]; then
@@ -13,10 +11,16 @@ if [ -f "self-hosted/.env" ]; then
     export $(cat self-hosted/.env | grep -v '^#' | xargs)
 fi
 
-# Check environment variables
+# Check required variables
 if [ -z "$SELFDEPLOYIP" ]; then
-    echo "⚠️  Error: SELFDEPLOYIP environment variable not detected"
-    echo "   Please set the target server IP address"
+    echo "⚠️  Error: SELFDEPLOYIP environment variable not set"
+    echo "   Usage: SELFDEPLOYIP=your.server.ip DOMAIN=example.com ./deploy-direct-nginx.sh"
+    exit 1
+fi
+
+if [ -z "$DOMAIN" ]; then
+    echo "⚠️  Error: DOMAIN environment variable not set"
+    echo "   Usage: SELFDEPLOYIP=your.server.ip DOMAIN=example.com ./deploy-direct-nginx.sh"
     exit 1
 fi
 
@@ -32,15 +36,21 @@ if [ ! -f "self-hosted/self-hosted-deploy.pem" ]; then
     exit 1
 fi
 
+echo "🚀 Starting deployment for domain: $DOMAIN"
 echo "📡 Target server: $SELFDEPLOYIP"
 
 # Set SSH key permissions
 chmod 600 self-hosted/self-hosted-deploy.pem
 
-# Configuration variables
-SITE_DIR="/opt/example-site"
+# Derive configuration variables from domain
+DOMAIN_CLEAN=$(echo "$DOMAIN" | sed 's/www\.//')  # Remove www. prefix if present
+SITE_DIR="/opt/${DOMAIN_CLEAN//./-}-site"  # Convert dots to dashes for directory
+CONFIG_NAME="$DOMAIN_CLEAN"  # Use clean domain for config filename
 SSH_KEY="self-hosted/self-hosted-deploy.pem"
 SSH_OPTS="-i $SSH_KEY -o StrictHostKeyChecking=no"
+
+echo "📁 Site directory: $SITE_DIR"
+echo "🔧 Config name: $CONFIG_NAME"
 
 # # 2. Install nginx and certbot
 # echo "📦 Installing nginx and certbot..."
@@ -83,11 +93,19 @@ scp $SSH_OPTS self-hosted/nginx-main.conf "ubuntu@$SELFDEPLOYIP:/tmp/nginx-defau
 ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
     "sudo mv /tmp/nginx-default /etc/nginx/sites-available/default"
 
-# Upload temporary site configuration file
-scp $SSH_OPTS self-hosted/example-site-temp.conf "ubuntu@$SELFDEPLOYIP:/tmp/example-site-temp"
+# Generate and upload temporary site configuration file
+echo "⚙️  Generating temporary site configuration..."
+sed -e "s/example\.com/$DOMAIN_CLEAN/g" \
+    -e "s/www\.example\.com/www.$DOMAIN_CLEAN/g" \
+    -e "s/example_access\.log/${DOMAIN_CLEAN//./_}_access.log/g" \
+    -e "s/example_error\.log/${DOMAIN_CLEAN//./_}_error.log/g" \
+    -e "s/\/opt\/example-site/$SITE_DIR/g" \
+    self-hosted/example-site-temp.conf > "/tmp/${CONFIG_NAME}-temp.conf"
+
+scp $SSH_OPTS "/tmp/${CONFIG_NAME}-temp.conf" "ubuntu@$SELFDEPLOYIP:/tmp/${CONFIG_NAME}-temp"
 ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
-    "sudo mv /tmp/example-site-temp /etc/nginx/sites-available/example.com && \
-     sudo ln -sf /etc/nginx/sites-available/example.com /etc/nginx/sites-enabled/"
+    "sudo mv /tmp/${CONFIG_NAME}-temp /etc/nginx/sites-available/$CONFIG_NAME && \
+     sudo ln -sf /etc/nginx/sites-available/$CONFIG_NAME /etc/nginx/sites-enabled/"
 
 # Upload SSL setup script
 scp $SSH_OPTS self-hosted/setup-ssl.sh "ubuntu@$SELFDEPLOYIP:/tmp/setup-ssl.sh"
@@ -125,13 +143,20 @@ ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
 # 12. Automatically request SSL certificate
 echo "🔒 Setting up SSL certificate..."
 ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
-    "export CLOUDFLARE_API_TOKEN='$CLOUDFLARE_API_TOKEN' && sudo -E /root/setup-ssl.sh"
+    "export CLOUDFLARE_API_TOKEN='$CLOUDFLARE_API_TOKEN' && export DOMAIN='$DOMAIN' && sudo -E /root/setup-ssl.sh"
 
-# 13. Upload final site configuration (with Let's Encrypt certificate paths)
-echo "🔄 Updating nginx configuration to use Let's Encrypt certificates..."
-scp $SSH_OPTS self-hosted/example-site.conf "ubuntu@$SELFDEPLOYIP:/tmp/example-site-final"
+# 13. Generate and upload final site configuration (with Let's Encrypt certificate paths)
+echo "🔄 Generating final nginx configuration to use Let's Encrypt certificates..."
+sed -e "s/example\.com/$DOMAIN_CLEAN/g" \
+    -e "s/www\.example\.com/www.$DOMAIN_CLEAN/g" \
+    -e "s/example_access\.log/${DOMAIN_CLEAN//./_}_access.log/g" \
+    -e "s/example_error\.log/${DOMAIN_CLEAN//./_}_error.log/g" \
+    -e "s/\/opt\/example-site/$SITE_DIR/g" \
+    self-hosted/example-site.conf > "/tmp/${CONFIG_NAME}-final.conf"
+
+scp $SSH_OPTS "/tmp/${CONFIG_NAME}-final.conf" "ubuntu@$SELFDEPLOYIP:/tmp/${CONFIG_NAME}-final"
 ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
-    "sudo mv /tmp/example-site-final /etc/nginx/sites-available/example.com"
+    "sudo mv /tmp/${CONFIG_NAME}-final /etc/nginx/sites-available/$CONFIG_NAME"
 
 # 14. Test configuration and restart nginx
 echo "🧪 Testing nginx configuration..."
@@ -145,19 +170,23 @@ ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
 echo "🧪 Testing HTTPS access..."
 sleep 5
 ssh $SSH_OPTS "ubuntu@$SELFDEPLOYIP" \
-    "curl -s -o /dev/null -w 'HTTPS Status: %{http_code}\n' https://www.example.com/ --insecure || echo 'HTTPS test failed'"
+    "curl -s -o /dev/null -w 'HTTPS Status: %{http_code}\n' https://www.$DOMAIN/ --insecure || echo 'HTTPS test failed'"
 
 echo ""
 echo "✅ Direct Nginx + SSL deployment completed!"
 echo "🔗 Access URLs:"
 echo "   HTTP: http://$SELFDEPLOYIP"
-echo "   HTTPS: https://www.example.com"
+echo "   HTTPS: https://www.$DOMAIN"
 echo ""
 echo "🧪 Test commands:"
 echo "   HTTP: curl http://$SELFDEPLOYIP/"
-echo "   HTTPS (after SSL): curl https://www.example.com/"
+echo "   HTTPS (after SSL): curl https://www.$DOMAIN/"
 echo ""
 echo "🔍 Monitoring commands:"
-echo "  View access logs: ssh $SSH_OPTS ubuntu@$SELFDEPLOYIP 'sudo tail -f /var/log/nginx/example_access.log'"
-echo "  View error logs: ssh $SSH_OPTS ubuntu@$SELFDEPLOYIP 'sudo tail -f /var/log/nginx/example_error.log'"
+echo "  View access logs: ssh $SSH_OPTS ubuntu@$SELFDEPLOYIP 'sudo tail -f /var/log/nginx/${DOMAIN_CLEAN//./_}_access.log'"
+echo "  View error logs: ssh $SSH_OPTS ubuntu@$SELFDEPLOYIP 'sudo tail -f /var/log/nginx/${DOMAIN_CLEAN//./_}_error.log'"
 echo "  Check service status: ssh $SSH_OPTS ubuntu@$SELFDEPLOYIP 'sudo systemctl status nginx'"
+
+# Clean up temporary files
+echo "🧹 Cleaning up temporary files..."
+rm -f "/tmp/${CONFIG_NAME}-temp.conf" "/tmp/${CONFIG_NAME}-final.conf"
