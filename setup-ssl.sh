@@ -5,31 +5,31 @@
 
 set -e
 
-echo "🔒 开始设置 SSL 证书..."
+echo "🔒 Starting SSL certificate setup..."
 
-# 检查环境变量
+# Check environment variables
 if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-    echo "⚠️  错误: 未设置 CLOUDFLARE_API_TOKEN 环境变量"
+    echo "⚠️  Error: CLOUDFLARE_API_TOKEN environment variable not set"
     exit 1
 fi
 
-# 安装 Cloudflare DNS 插件
-echo "📦 安装 Cloudflare DNS 插件..."
+# Install Cloudflare DNS plugin
+echo "📦 Installing Cloudflare DNS plugin..."
 apt update
 apt install -y python3-certbot-dns-cloudflare
 
-# 创建 Cloudflare 凭据文件
-echo "🔑 创建 Cloudflare 凭据文件..."
+# Create Cloudflare credentials file
+echo "🔑 Creating Cloudflare credentials file..."
 mkdir -p /etc/letsencrypt
 cat > /etc/letsencrypt/cloudflare.ini << EOF
 dns_cloudflare_api_token = $CLOUDFLARE_API_TOKEN
 EOF
 
-# 设置凭据文件权限
+# Set credentials file permissions
 chmod 600 /etc/letsencrypt/cloudflare.ini
 
-# 申请 SSL 证书
-echo "📜 申请 SSL 证书..."
+# Request SSL certificate
+echo "📜 Requesting SSL certificate..."
 certbot certonly \
     --dns-cloudflare \
     --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
@@ -40,13 +40,13 @@ certbot certonly \
     --agree-tos \
     --email admin@example.com
 
-# 设置自动续期
-echo "⏰ 设置自动续期..."
+# Setup automatic renewal
+echo "⏰ Setting up automatic renewal..."
 crontab -l > /tmp/crontab.bak 2>/dev/null || true
 echo "0 2 * * * certbot renew --quiet && systemctl reload nginx" >> /tmp/crontab.bak
 crontab /tmp/crontab.bak
 rm /tmp/crontab.bak
 
-echo "✅ SSL 证书设置完成！"
-echo "📜 证书位置: /etc/letsencrypt/live/example.com/"
-echo "⏰ 自动续期已设置 (每天凌晨2点检查)"
+echo "✅ SSL certificate setup completed!"
+echo "📜 Certificate location: /etc/letsencrypt/live/example.com/"
+echo "⏰ Automatic renewal set up (checks daily at 2 AM)"
